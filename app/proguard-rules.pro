@@ -1,0 +1,2 @@
+-keep class com.smartledger.licenseissuer.crypto.** { *; }
+-dontwarn javax.naming.**

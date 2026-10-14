@@ -20,10 +20,6 @@ data class IssuerContactConfig(
     val footerNote: String
 )
 
-/**
- * Protects the ECDSA P-256 Issuer Private Key at rest using an Android Keystore hardware-backed AES-256-GCM key.
- * Strictly avoids embedding production private keys inside public source files.
- */
 class KeyStoreVault(context: Context) {
     private val prefs = context.getSharedPreferences("smartledger_issuer_vault", Context.MODE_PRIVATE)
 
@@ -37,11 +33,6 @@ class KeyStoreVault(context: Context) {
         private const val PREF_SUPPORT_PHONE = "contact_support_phone"
         private const val PREF_FOOTER_NOTE = "contact_footer_note"
 
-        /**
-         * The default Public Key configured in the Windows SmartLedger Pro verifier (LicenseCryptoVerifier.cs).
-         * Note: This is the PUBLIC key only. The corresponding Private Key is imported by the owner into
-         * the encrypted Android Keystore vault (or a new pair can be generated on-device).
-         */
         const val DEFAULT_WINDOWS_PUBLIC_KEY_SPKI_B64 =
             "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE9YrHLP2g0RExh7JeZQAdZS5YbAJu06X3a+Det9G4oWse9wdqCjjVu122OtgpG75idP1u6t+PYof5YXDMz35RcQ=="
     }
@@ -56,7 +47,7 @@ class KeyStoreVault(context: Context) {
 
     fun getPublicKeyFingerprint(): String {
         return try {
-            val clean = getPublicKeySpkiBase64().replace("\s".toRegex(), "")
+            val clean = getPublicKeySpkiBase64().replace("\\s".toRegex(), "")
             val bytes = Base64.getDecoder().decode(clean)
             val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
             digest.take(8).joinToString(":") { "%02X".format(it) }
@@ -78,10 +69,6 @@ class KeyStoreVault(context: Context) {
         return String(plainBytes, Charsets.UTF_8)
     }
 
-    /**
-     * Imports the owner's PKCS#8 Private Key and verifies it against the provided (or default Windows) Public Key
-     * before encrypting it with Android Keystore AES-256-GCM.
-     */
     fun importPrivateKey(privateKeyPkcs8Base64: String, publicKeySpkiBase64: String = getPublicKeySpkiBase64()) {
         val cleanPriv = privateKeyPkcs8Base64.trim()
         val cleanPub = publicKeySpkiBase64.trim().ifEmpty { DEFAULT_WINDOWS_PUBLIC_KEY_SPKI_B64 }
@@ -99,10 +86,6 @@ class KeyStoreVault(context: Context) {
         saveEncryptedKeyPair(cleanPriv, cleanPub)
     }
 
-    /**
-     * Generates a brand-new ECDSA P-256 production keypair on the device, encrypts the private key in Keystore,
-     * and returns the new SPKI Base64 Public Key to embed in Windows.
-     */
     fun generateNewProductionKeyPair(): String {
         val kpg = KeyPairGenerator.getInstance("EC")
         kpg.initialize(ECGenParameterSpec("secp256r1"))
@@ -117,7 +100,7 @@ class KeyStoreVault(context: Context) {
         return IssuerContactConfig(
             issuerTitle = prefs.getString(PREF_ISSUER_TITLE, "إدارة تراخيص الدفتر الذكي — SmartLedger Pro") ?: "إدارة تراخيص الدفتر الذكي — SmartLedger Pro",
             supportPhone = prefs.getString(PREF_SUPPORT_PHONE, "") ?: "",
-            footerNote = prefs.getString(PREF_FOOTER_NOTE, "ترخيص دائم يعمل دون الحاجة للاتصال بالإنترنت.") ?: "ترخيص دائم يعمل دون الحاجة للاتصال بالإنترنت."
+            footerNote = prefs.getString(PREF_FOOTER_NOTE, "ترخيص موثق رقمياً يعمل دون الحاجة للاتصال بالإنترنت.") ?: "ترخيص موثق رقمياً يعمل دون الحاجة للاتصال بالإنترنت."
         )
     }
 

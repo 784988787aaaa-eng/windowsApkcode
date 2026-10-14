@@ -30,10 +30,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.smartledger.licenseissuer.crypto.IssuedLicensePackage
-import com.smartledger.licenseissuer.crypto.IssuerContactConfig
-import com.smartledger.licenseissuer.crypto.KeyStoreVault
-import com.smartledger.licenseissuer.crypto.LicenseContract
+import com.smartledger.licenseissuer.crypto.*
 import com.smartledger.licenseissuer.data.LicenseHistoryDatabase
 import com.smartledger.licenseissuer.data.LicenseHistoryRecord
 import java.text.SimpleDateFormat
@@ -91,8 +88,13 @@ fun LicenseIssuerMainScreen(initialSharedText: String = "") {
 
     var selectedTab by remember { mutableStateOf(0) }
     var isKeyConfigured by remember { mutableStateOf(vault.isSigningKeyConfigured()) }
+
+    var selectedProduct by remember { mutableStateOf(LicenseContract.PRODUCT_CODE_SLPRO) }
     var deviceIdInput by remember { mutableStateOf("") }
     var customerNameInput by remember { mutableStateOf("") }
+    var customerCodeInput by remember { mutableStateOf("") }
+    var selectedLicenseType by remember { mutableStateOf(LicenseContract.LICENSE_TYPE_PERPETUAL) }
+    var durationDaysText by remember { mutableStateOf("365") }
     var notesInput by remember { mutableStateOf("") }
     var isProcessing by remember { mutableStateOf(false) }
 
@@ -101,24 +103,29 @@ fun LicenseIssuerMainScreen(initialSharedText: String = "") {
 
     var lastIssuedPackage by remember { mutableStateOf<IssuedLicensePackage?>(null) }
     var showConfirmIssueDialog by remember { mutableStateOf(false) }
+    var recordToRevoke by remember { mutableStateOf<LicenseHistoryRecord?>(null) }
 
     var searchQuery by remember { mutableStateOf("") }
-    var historyItems by remember { mutableStateOf(historyDb.listIssuedLicenses()) }
+    var statusFilter by remember { mutableStateOf<LicenseStatusState?>(null) }
+    var historyItems by remember {
+        mutableStateOf(historyDb.listIssuedLicenses(vault.getPublicKeySpkiBase64()))
+    }
+
+    fun refreshHistory() {
+        historyItems = historyDb.listIssuedLicenses(vault.getPublicKeySpkiBase64(), searchQuery, statusFilter)
+    }
 
     LaunchedEffect(initialSharedText) {
         if (initialSharedText.isNotBlank()) {
             val parsed = LicenseContract.parseIncomingRequest(initialSharedText)
             if (parsed.isValid) {
+                selectedProduct = parsed.productCode
                 deviceIdInput = parsed.deviceId
                 if (parsed.customerName.isNotBlank()) customerNameInput = parsed.customerName
-                statusBannerText = "تم استيراد بيانات طلب التفعيل من المشاركة بنجاح."
+                statusBannerText = "تم استيراد معرّف جهاز Windows (${parsed.deviceId}) وبيانات العميل بنجاح."
                 isStatusError = false
             }
         }
-    }
-
-    fun refreshHistory() {
-        historyItems = historyDb.listIssuedLicenses(searchQuery)
     }
 
     Scaffold(
@@ -151,7 +158,7 @@ fun LicenseIssuerMainScreen(initialSharedText: String = "") {
                                 color = TextPrimary
                             )
                             Text(
-                                text = "SmartLedger Pro — التوقيع الرقمي الدائم (ECDSA P-256)",
+                                text = "SmartLedger Pro — إصدار والتحقق من التراخيص الرقمية (ECDSA P-256)",
                                 fontSize = 11.5.sp,
                                 color = TextMuted
                             )
@@ -214,13 +221,13 @@ fun LicenseIssuerMainScreen(initialSharedText: String = "") {
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                "مفتاح الإصدار الرقمي غير مهيأ بعد على هذا الجهاز",
+                                "مفتاح التوقيع الرقمي غير مهيأ بعد على هذا الجهاز",
                                 color = Color(0xFFFEF3C7),
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 13.sp
                             )
                             Text(
-                                "استورد مفتاح المالك الخاص (PKCS#8) أو ولّد زوج مفاتيح جديد لبدء إصدار التراخيص.",
+                                "استورد مفتاح الإصدار الخاص (PKCS#8) أو ولّد زوج مفاتيح جديد لبدء إصدار التراخيص.",
                                 color = TextMuted,
                                 fontSize = 11.5.sp
                             )
@@ -271,10 +278,17 @@ fun LicenseIssuerMainScreen(initialSharedText: String = "") {
 
             when (selectedTab) {
                 0 -> IssueLicenseTab(
+                    selectedProduct = selectedProduct,
                     deviceIdInput = deviceIdInput,
                     onDeviceIdChange = { deviceIdInput = it },
                     customerNameInput = customerNameInput,
                     onCustomerNameChange = { customerNameInput = it },
+                    customerCodeInput = customerCodeInput,
+                    onCustomerCodeChange = { customerCodeInput = it },
+                    selectedLicenseType = selectedLicenseType,
+                    onLicenseTypeChange = { selectedLicenseType = it },
+                    durationDaysText = durationDaysText,
+                    onDurationDaysChange = { durationDaysText = it },
                     notesInput = notesInput,
                     onNotesChange = { notesInput = it },
                     lastIssuedPackage = lastIssuedPackage,
@@ -282,9 +296,10 @@ fun LicenseIssuerMainScreen(initialSharedText: String = "") {
                         val clip = readClipboard(context)
                         val parsed = LicenseContract.parseIncomingRequest(clip)
                         if (parsed.isValid) {
+                            selectedProduct = parsed.productCode
                             deviceIdInput = parsed.deviceId
                             if (parsed.customerName.isNotBlank()) customerNameInput = parsed.customerName
-                            statusBannerText = "تم استخراج معرّف الجهاز (${parsed.deviceId}) وبيانات العميل من الحافظة."
+                            statusBannerText = "تم استخراج معرّف جهاز Windows (${parsed.deviceId}) من الحافظة."
                             isStatusError = false
                         } else {
                             statusBannerText = parsed.errorMessageAr
@@ -294,19 +309,24 @@ fun LicenseIssuerMainScreen(initialSharedText: String = "") {
                     onClearForm = {
                         deviceIdInput = ""
                         customerNameInput = ""
+                        customerCodeInput = ""
                         notesInput = ""
                         statusBannerText = ""
                     },
                     onRequestIssue = {
+                        val days = durationDaysText.trim().toIntOrNull() ?: 0
                         if (!isKeyConfigured) {
                             statusBannerText = "يرجى إعداد مفتاح الإصدار الخاص أولاً من تبويب «المفاتيح والإعدادات»."
                             isStatusError = true
                             selectedTab = 2
                         } else if (!LicenseContract.isValidDeviceCode(deviceIdInput)) {
-                            statusBannerText = "معرّف الجهاز غير صالح. يجب أن يكون بالصيغة SLP-XXXX-XXXX-XXXX-XXXX."
+                            statusBannerText = "معرّف جهاز Windows غير صالح. يجب أن يكون بالصيغة SLP-XXXX-XXXX-XXXX-XXXX."
                             isStatusError = true
                         } else if (customerNameInput.trim().length < 2) {
-                            statusBannerText = "يرجى إدخال اسم العميل أو المنشأة (حرفين على الأقل) لتوثيق الترخيص."
+                            statusBannerText = "يرجى إدخال اسم العميل أو الجهة (حرفان على الأقل)."
+                            isStatusError = true
+                        } else if (selectedLicenseType == LicenseContract.LICENSE_TYPE_TIMED && days <= 0) {
+                            statusBannerText = "أدخل مدة صلاحية صحيحة بالأيام للترخيص المحدد بمدة."
                             isStatusError = true
                         } else {
                             showConfirmIssueDialog = true
@@ -314,7 +334,7 @@ fun LicenseIssuerMainScreen(initialSharedText: String = "") {
                     },
                     onCopyCode = { code ->
                         copyToClipboard(context, "SmartLedger Activation Code", code)
-                        statusBannerText = "تم نسخ كود التفعيل الدائم إلى الحافظة بنجاح."
+                        statusBannerText = "تم نسخ مفتاح الترخيص إلى الحافظة بنجاح."
                         isStatusError = false
                     },
                     onShareWhatsApp = { pkg ->
@@ -328,14 +348,27 @@ fun LicenseIssuerMainScreen(initialSharedText: String = "") {
                         searchQuery = it
                         refreshHistory()
                     },
+                    selectedFilter = statusFilter,
+                    onFilterChange = {
+                        statusFilter = it
+                        refreshHistory()
+                    },
                     records = historyItems,
                     onCopyCode = { rec ->
                         copyToClipboard(context, "SmartLedger Activation Code", rec.activationCode)
-                        statusBannerText = "تم نسخ كود التفعيل الخاص بـ «${rec.customerName}»."
+                        statusBannerText = "تم نسخ مفتاح الترخيص الخاص بـ «${rec.customerName}»."
                         isStatusError = false
                     },
                     onShareRecord = { rec ->
-                        shareRawCodeViaWhatsApp(context, rec.customerName, rec.deviceId, rec.activationCode, vault.getContactConfig())
+                        shareRawCodeViaWhatsApp(context, rec.customerName, rec.deviceId, rec.licenseTypeLabelAr, rec.activationCode, vault.getContactConfig())
+                    },
+                    onRequestRevoke = { rec ->
+                        recordToRevoke = rec
+                    },
+                    onCopyRevocationCode = { rec ->
+                        copyToClipboard(context, "SmartLedger Revocation Code", rec.revocationCode)
+                        statusBannerText = "تم نسخ شهادة إلغاء الترخيص (SLREV1) إلى الحافظة."
+                        isStatusError = false
                     }
                 )
 
@@ -354,17 +387,29 @@ fun LicenseIssuerMainScreen(initialSharedText: String = "") {
 
     if (showConfirmIssueDialog) {
         val normalizedDid = LicenseContract.formatCanonicalDeviceCode(deviceIdInput)
+        val days = durationDaysText.trim().toIntOrNull() ?: 365
+        val nowSec = System.currentTimeMillis() / 1000L
+        val expSec = if (selectedLicenseType == LicenseContract.LICENSE_TYPE_TIMED) nowSec + (days * 86400L) else 0L
+        val df = remember { SimpleDateFormat("yyyy/MM/dd", Locale.US) }
+
         AlertDialog(
             onDismissRequest = { showConfirmIssueDialog = false },
             containerColor = CardDark,
-            title = { Text("تأكيد إصدار ترخيص دائم", fontWeight = FontWeight.Bold, color = TextPrimary) },
+            title = { Text("تأكيد إصدار مفتاح ترخيص", fontWeight = FontWeight.Bold, color = TextPrimary) },
             text = {
                 Column {
-                    Text("هل تريد توقيع وإصدار ترخيص دائم بالبيانات التالية؟", color = TextMuted, fontSize = 13.5.sp)
+                    Text("هل تريد توقيع وإصدار الترخيص بالبيانات التالية؟", color = TextMuted, fontSize = 13.5.sp)
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text("• المنشأة / العميل: ${customerNameInput.trim()}", color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                    Text("• معرّف الجهاز: $normalizedDid", color = AccentCyan, fontFamily = FontFamily.Monospace)
-                    Text("• نوع الترخيص: دائم (لا ينتهي بمرور الوقت)", color = AccentEmerald)
+                    Text("• المنتج: SmartLedger Pro ($selectedProduct)", color = TextPrimary)
+                    Text("• العميل / الجهة: ${customerNameInput.trim()}", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                    Text("• معرّف جهاز Windows: $normalizedDid", color = AccentCyan, fontFamily = FontFamily.Monospace)
+                    Text(
+                        text = if (expSec > 0L)
+                            "• الصلاحية: محدد بمدة ($days يوماً — من ${df.format(Date(nowSec * 1000L))} حتى ${df.format(Date(expSec * 1000L))})"
+                        else
+                            "• الصلاحية: ترخيص دائم (لا ينتهي بمرور الوقت)",
+                        color = AccentEmerald
+                    )
                 }
             },
             confirmButton = {
@@ -373,18 +418,24 @@ fun LicenseIssuerMainScreen(initialSharedText: String = "") {
                         showConfirmIssueDialog = false
                         isProcessing = true
                         try {
-                            val pkg = LicenseContract.issuePerpetualLicense(
+                            val pkg = LicenseContract.issueLicense(
+                                productCode = selectedProduct,
+                                licenseType = selectedLicenseType,
                                 rawDeviceId = normalizedDid,
                                 customerName = customerNameInput.trim(),
+                                customerCode = customerCodeInput.trim(),
+                                startsAtUnixSeconds = nowSec,
+                                expiresAtUnixSeconds = expSec,
                                 notes = notesInput.trim(),
                                 privateKeyPkcs8Base64 = vault.loadDecryptedPrivateKeyPkcs8Base64(),
-                                publicKeySpkiBase64 = vault.getPublicKeySpkiBase64()
+                                publicKeySpkiBase64 = vault.getPublicKeySpkiBase64(),
+                                issuedAtUnixOverride = nowSec
                             )
                             historyDb.recordIssuedLicense(pkg)
                             lastIssuedPackage = pkg
                             deviceIdInput = normalizedDid
                             refreshHistory()
-                            statusBannerText = "تم إصدار وتوقيع كود التفعيل الدائم بنجاح وحفظه في السجل."
+                            statusBannerText = "تم إصدار وتوقيع مفتاح الترخيص بنجاح وحفظه في السجل الدائم."
                             isStatusError = false
                         } catch (ex: Exception) {
                             statusBannerText = "فشل إصدار الترخيص: ${ex.message}"
@@ -395,7 +446,7 @@ fun LicenseIssuerMainScreen(initialSharedText: String = "") {
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = AccentEmerald)
                 ) {
-                    Text("تأكيد وإصدار الكود", fontWeight = FontWeight.Bold)
+                    Text("تأكيد وإصدار المفتاح", fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
@@ -405,14 +456,69 @@ fun LicenseIssuerMainScreen(initialSharedText: String = "") {
             }
         )
     }
+
+    if (recordToRevoke != null) {
+        val target = recordToRevoke!!
+        AlertDialog(
+            onDismissRequest = { recordToRevoke = null },
+            containerColor = CardDark,
+            title = { Text("تأكيد إلغاء الترخيص", fontWeight = FontWeight.Bold, color = DangerRed) },
+            text = {
+                Text(
+                    "هل تريد تغيير حالة الترخيص رقم (${target.licenseId}) للعميل «${target.customerName}» إلى «ملغى» في قاعدة البيانات وإصدار شهادة إلغاء موقّعة (SLREV1)؟",
+                    color = TextPrimary,
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        recordToRevoke = null
+                        try {
+                            val revCode = LicenseContract.issueRevocationCertificate(
+                                licenseId = target.licenseId,
+                                deviceId = target.deviceId,
+                                reason = "إلغاء إداري من سجل التراخيص",
+                                privateKeyPkcs8Base64 = vault.loadDecryptedPrivateKeyPkcs8Base64(),
+                                publicKeySpkiBase64 = vault.getPublicKeySpkiBase64()
+                            )
+                            historyDb.markLicenseRevoked(target.licenseId, revCode)
+                            copyToClipboard(context, "SmartLedger Revocation Code", revCode)
+                            refreshHistory()
+                            statusBannerText = "تم إلغاء الترخيص في قاعدة البيانات ونسخ شهادة الإلغاء (SLREV1) إلى الحافظة."
+                            isStatusError = false
+                        } catch (ex: Exception) {
+                            statusBannerText = "تعذر إلغاء الترخيص: ${ex.message}"
+                            isStatusError = true
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = DangerRed)
+                ) {
+                    Text("تأكيد الإلغاء", fontWeight = FontWeight.Bold, color = Color.White)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { recordToRevoke = null }) {
+                    Text("تراجع")
+                }
+            }
+        )
+    }
 }
 
 @Composable
 fun IssueLicenseTab(
+    selectedProduct: String,
     deviceIdInput: String,
     onDeviceIdChange: (String) -> Unit,
     customerNameInput: String,
     onCustomerNameChange: (String) -> Unit,
+    customerCodeInput: String,
+    onCustomerCodeChange: (String) -> Unit,
+    selectedLicenseType: String,
+    onLicenseTypeChange: (String) -> Unit,
+    durationDaysText: String,
+    onDurationDaysChange: (String) -> Unit,
     notesInput: String,
     onNotesChange: (String) -> Unit,
     lastIssuedPackage: IssuedLicensePackage?,
@@ -423,6 +529,10 @@ fun IssueLicenseTab(
     onShareWhatsApp: (IssuedLicensePackage) -> Unit
 ) {
     val isDeviceValid = LicenseContract.isValidDeviceCode(deviceIdInput)
+    val df = remember { SimpleDateFormat("yyyy/MM/dd", Locale.US) }
+    val nowMs = System.currentTimeMillis()
+    val daysInt = durationDaysText.trim().toIntOrNull() ?: 0
+    val expMs = nowMs + (daysInt * 86400_000L)
 
     Column(
         modifier = Modifier
@@ -444,11 +554,12 @@ fun IssueLicenseTab(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("بيانات طلب التفعيل", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = AccentCyan)
+                        Text("إصدار مفتاح ترخيص جديد", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = AccentCyan)
                         Text(
-                            "ألصق رسالة العميل الواردة من واتساب أو أدخل معرّف الجهاز مباشرة.",
+                            "المنتج المستهدف: الدفتر الذكي — SmartLedger Pro ($selectedProduct)",
                             fontSize = 12.sp,
-                            color = TextMuted
+                            color = AccentEmerald,
+                            fontWeight = FontWeight.SemiBold
                         )
                     }
                     OutlinedButton(
@@ -457,24 +568,24 @@ fun IssueLicenseTab(
                     ) {
                         Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("لصق طلب واتساب", fontSize = 12.sp)
+                        Text("لصق معرّف / طلب", fontSize = 12.sp)
                     }
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 OutlinedTextField(
                     value = deviceIdInput,
                     onValueChange = onDeviceIdChange,
-                    label = { Text("معرّف جهاز العميل (Device ID) *") },
+                    label = { Text("معرّف جهاز Windows (Device ID) *") },
                     placeholder = { Text("SLP-XXXX-XXXX-XXXX-XXXX") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     supportingText = {
                         if (deviceIdInput.isNotBlank()) {
                             Text(
-                                text = if (isDeviceValid) "✓ صيغة معرّف الجهاز صحيحة (${LicenseContract.formatCanonicalDeviceCode(deviceIdInput)})"
-                                else "✗ يجب أن يتكون المعرّف من 16 رمزاً ست عشرياً (SLP-XXXX-XXXX-XXXX-XXXX)",
+                                text = if (isDeviceValid) "✓ معرّف جهاز Windows صالح ومطابق للصيغة المعتمدة (${LicenseContract.formatCanonicalDeviceCode(deviceIdInput)})"
+                                else "✗ المعرّف غير صالح؛ يجب أن يتكون من 16 رمزاً ست عشرياً (SLP-XXXX-XXXX-XXXX-XXXX)",
                                 color = if (isDeviceValid) AccentEmerald else DangerRed
                             )
                         }
@@ -483,27 +594,93 @@ fun IssueLicenseTab(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                OutlinedTextField(
-                    value = customerNameInput,
-                    onValueChange = onCustomerNameChange,
-                    label = { Text("اسم العميل / المنشأة *") },
-                    placeholder = { Text("مثال: مؤسسة الأمل التجارية") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(
+                        value = customerNameInput,
+                        onValueChange = onCustomerNameChange,
+                        label = { Text("اسم العميل أو الجهة *") },
+                        placeholder = { Text("مؤسسة الأمل التجارية") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1.4f)
+                    )
+                    OutlinedTextField(
+                        value = customerCodeInput,
+                        onValueChange = onCustomerCodeChange,
+                        label = { Text("رقم العميل (اختياري)") },
+                        placeholder = { Text("C-101") },
+                        singleLine = true,
+                        modifier = Modifier.weight(0.9f)
+                    )
+                }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("نوع الترخيص ومدته:", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    val isPerp = selectedLicenseType == LicenseContract.LICENSE_TYPE_PERPETUAL
+                    Button(
+                        onClick = { onLicenseTypeChange(LicenseContract.LICENSE_TYPE_PERPETUAL) },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isPerp) AccentEmerald else Color(0xFF162640)
+                        )
+                    ) {
+                        Text("ترخيص دائم (PERPETUAL)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Button(
+                        onClick = { onLicenseTypeChange(LicenseContract.LICENSE_TYPE_TIMED) },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (!isPerp) AccentCyan else Color(0xFF162640)
+                        )
+                    ) {
+                        Text("محدد بمدة (TIMED)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                if (selectedLicenseType == LicenseContract.LICENSE_TYPE_TIMED) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        for ((label, dVal) in listOf("سنة (365)" to "365", "6 أشهر (180)" to "180", "شهر (30)" to "30")) {
+                            OutlinedButton(
+                                onClick = { onDurationDaysChange(dVal) },
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
+                            ) {
+                                Text(label, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = durationDaysText,
+                        onValueChange = onDurationDaysChange,
+                        label = { Text("مدة الصلاحية بالأيام *") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        supportingText = {
+                            if (daysInt > 0) {
+                                Text(
+                                    "تاريخ البداية: ${df.format(Date(nowMs))}  •  تاريخ الانتهاء: ${df.format(Date(expMs))}",
+                                    color = AccentCyan
+                                )
+                            }
+                        }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 OutlinedTextField(
                     value = notesInput,
                     onValueChange = onNotesChange,
                     label = { Text("ملاحظات الإصدار (اختياري)") },
-                    placeholder = { Text("مثال: فرع صنعاء الرئيسي") },
+                    placeholder = { Text("مثال: الفرع الرئيسي") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                     Button(
@@ -516,7 +693,7 @@ fun IssueLicenseTab(
                     ) {
                         Icon(Icons.Default.Verified, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("إصدار كود التفعيل الدائم", fontSize = 14.5.sp, fontWeight = FontWeight.Bold)
+                        Text("إصدار مفتاح الترخيص", fontSize = 14.5.sp, fontWeight = FontWeight.Bold)
                     }
                     if (deviceIdInput.isNotBlank() || customerNameInput.isNotBlank() || notesInput.isNotBlank()) {
                         OutlinedButton(
@@ -546,7 +723,7 @@ fun IssueLicenseTab(
                         Icon(Icons.Default.CheckCircle, contentDescription = null, tint = AccentEmerald)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            "نتيجة الإصدار — كود التفعيل الدائم جاهز",
+                            "تم إصدار مفتاح الترخيص وتوقيعه رقمياً",
                             fontSize = 15.5.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFFD1FAE5)
@@ -586,7 +763,7 @@ fun IssueLicenseTab(
                         ) {
                             Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("نسخ الكود", fontWeight = FontWeight.Bold)
+                            Text("نسخ المفتاح", fontWeight = FontWeight.Bold)
                         }
                         OutlinedButton(
                             onClick = { onShareWhatsApp(lastIssuedPackage) },
@@ -607,22 +784,49 @@ fun IssueLicenseTab(
 fun LicenseHistoryTab(
     searchQuery: String,
     onSearchChange: (String) -> Unit,
+    selectedFilter: LicenseStatusState?,
+    onFilterChange: (LicenseStatusState?) -> Unit,
     records: List<LicenseHistoryRecord>,
     onCopyCode: (LicenseHistoryRecord) -> Unit,
-    onShareRecord: (LicenseHistoryRecord) -> Unit
+    onShareRecord: (LicenseHistoryRecord) -> Unit,
+    onRequestRevoke: (LicenseHistoryRecord) -> Unit,
+    onCopyRevocationCode: (LicenseHistoryRecord) -> Unit
 ) {
-    val dateFormat = remember { SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.US) }
+    val dateFormat = remember { SimpleDateFormat("yyyy/MM/dd", Locale.US) }
 
     Column(modifier = Modifier.fillMaxSize()) {
         OutlinedTextField(
             value = searchQuery,
             onValueChange = onSearchChange,
-            label = { Text("بحث في سجل التراخيص (باسم العميل أو معرّف الجهاز أو رقم الترخيص)") },
+            label = { Text("بحث في السجل (باسم العميل أو رقم العميل أو معرّف الجهاز)") },
             leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+            val filters = listOf(
+                null to "الكل",
+                LicenseStatusState.ACTIVE to "صالح",
+                LicenseStatusState.EXPIRED to "منتهي",
+                LicenseStatusState.REVOKED to "ملغى"
+            )
+            for ((st, label) in filters) {
+                val active = selectedFilter == st
+                Button(
+                    onClick = { onFilterChange(st) },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(vertical = 6.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (active) AccentCyan else Color(0xFF162640)
+                    )
+                ) {
+                    Text(label, fontSize = 11.5.sp, fontWeight = if (active) FontWeight.Bold else FontWeight.Normal)
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(10.dp))
 
         if (records.isEmpty()) {
             Box(
@@ -636,13 +840,19 @@ fun LicenseHistoryTab(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(Icons.Default.History, contentDescription = null, tint = TextMuted, modifier = Modifier.size(48.dp))
                     Spacer(modifier = Modifier.height(10.dp))
-                    Text("لا توجد تراخيص مطابقة في السجل حالياً", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                    Text("ستظهر هنا جميع التراخيص الدائمة التي تصدرها مع إمكانية إعادة نسخها أو مشاركتها في أي وقت.", fontSize = 12.5.sp, color = TextMuted, textAlign = TextAlign.Center)
+                    Text("لا توجد تراخيص مطابقة في السجل المحلي", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                    Text("يُحفظ السجل محلياً في قاعدة بيانات SQLite داخل جهاز المسؤول مع التحقق الديناميكي من حالة كل ترخيص.", fontSize = 12.sp, color = TextMuted, textAlign = TextAlign.Center)
                 }
             }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(records, key = { it.licenseId }) { rec ->
+                    val badgeColor = when (rec.evaluatedState) {
+                        LicenseStatusState.ACTIVE -> AccentEmerald
+                        LicenseStatusState.EXPIRED -> WarningAmber
+                        LicenseStatusState.REVOKED, LicenseStatusState.INVALID, LicenseStatusState.DEVICE_MISMATCH -> DangerRed
+                        LicenseStatusState.NOT_YET_VALID -> AccentCyan
+                    }
                     Surface(
                         color = CardDark,
                         shape = RoundedCornerShape(12.dp),
@@ -657,36 +867,56 @@ fun LicenseHistoryTab(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(rec.customerName, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
                                 Text(
-                                    rec.status,
-                                    fontSize = 11.5.sp,
-                                    color = AccentEmerald,
-                                    fontWeight = FontWeight.SemiBold
+                                    text = if (rec.customerCode.isBlank()) rec.customerName else "${rec.customerName} (${rec.customerCode})",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = rec.statusLabelAr,
+                                    fontSize = 12.sp,
+                                    color = badgeColor,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                "معرّف الجهاز: ${rec.deviceId}  •  رقم الترخيص: ${rec.licenseId}",
+                                "معرّف الجهاز: ${rec.deviceId}  •  الترخيص: ${rec.licenseId}",
                                 fontSize = 12.sp,
                                 color = AccentCyan,
                                 fontFamily = FontFamily.Monospace
                             )
-                            Text(
-                                "تاريخ الإصدار: ${dateFormat.format(Date(rec.issuedAtUnixSeconds * 1000L))}  •  النوع: ${rec.licenseType}",
-                                fontSize = 11.5.sp,
-                                color = TextMuted
-                            )
+                            val validityText = if (rec.expiresAtUnixSeconds > 0L)
+                                "محدد بمدة: ${dateFormat.format(Date(rec.startsAtUnixSeconds * 1000L))} ⬅ ${dateFormat.format(Date(rec.expiresAtUnixSeconds * 1000L))}"
+                            else
+                                "دائم • تاريخ الإصدار: ${dateFormat.format(Date(rec.issuedAtUnixSeconds * 1000L))}"
+                            Text(validityText, fontSize = 11.5.sp, color = TextMuted)
                             if (rec.notes.isNotBlank()) {
                                 Text("ملاحظات: ${rec.notes}", fontSize = 11.5.sp, color = TextMuted)
                             }
                             Spacer(modifier = Modifier.height(8.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 OutlinedButton(onClick = { onCopyCode(rec) }, modifier = Modifier.weight(1f)) {
-                                    Text("نسخ كود التفعيل", fontSize = 12.sp)
+                                    Text("نسخ المفتاح", fontSize = 11.5.sp)
                                 }
                                 OutlinedButton(onClick = { onShareRecord(rec) }, modifier = Modifier.weight(1f)) {
-                                    Text("إرسال عبر واتساب", fontSize = 12.sp)
+                                    Text("مشاركة", fontSize = 11.5.sp)
+                                }
+                                if (!rec.isRevoked) {
+                                    OutlinedButton(
+                                        onClick = { onRequestRevoke(rec) },
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("إلغاء الترخيص", fontSize = 11.5.sp, color = DangerRed)
+                                    }
+                                } else if (rec.revocationCode.isNotBlank()) {
+                                    OutlinedButton(
+                                        onClick = { onCopyRevocationCode(rec) },
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("نسخ شهادة الإلغاء", fontSize = 11.sp, color = WarningAmber)
+                                    }
                                 }
                             }
                         }
@@ -722,7 +952,6 @@ fun SecurityAndContactSettingsTab(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // 1. إدارة مفتاح التوقيع الرقمي (ECDSA P-256)
         Surface(
             color = CardDark,
             shape = RoundedCornerShape(14.dp),
@@ -747,7 +976,7 @@ fun SecurityAndContactSettingsTab(
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    "يُحفظ مفتاح الإصدار الخاص مشفراً داخل Android Keystore (AES-256-GCM) ولا يُضمّن في الكود العام أو السجلات.",
+                    "يعمل التطبيق محلياً دون خادم؛ يُحفظ مفتاح الإصدار الخاص مشفراً داخل شريحة Android Keystore (AES-256-GCM) ولا يُضمّن في الكود المصدري العام.",
                     fontSize = 12.sp,
                     color = TextMuted
                 )
@@ -826,7 +1055,6 @@ fun SecurityAndContactSettingsTab(
             }
         }
 
-        // 2. إعدادات الاتصال والتواصل ورسالة التسليم
         Surface(
             color = CardDark,
             shape = RoundedCornerShape(14.dp),
@@ -839,7 +1067,7 @@ fun SecurityAndContactSettingsTab(
                 Text("2. إعدادات التواصل ورسالة تسليم الترخيص", fontSize = 15.5.sp, fontWeight = FontWeight.Bold, color = AccentCyan)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    "تُدرج هذه البيانات تلقائياً في رسالة تسليم كود التفعيل المرسلة للعميل عبر واتساب.",
+                    "تُدرج هذه البيانات تلقائياً في رسالة تسليم مفتاح الترخيص المرسلة للعميل.",
                     fontSize = 12.sp,
                     color = TextMuted
                 )
@@ -930,27 +1158,29 @@ private fun readClipboard(context: Context): String {
 }
 
 private fun shareLicenseViaWhatsApp(context: Context, pkg: IssuedLicensePackage, contact: IssuerContactConfig) {
-    shareRawCodeViaWhatsApp(context, pkg.customerName, pkg.deviceId, pkg.activationCode, contact)
+    val typeLabel = if (pkg.licenseType == LicenseContract.LICENSE_TYPE_TIMED) "محدد بمدة" else "دائم"
+    shareRawCodeViaWhatsApp(context, pkg.customerName, pkg.deviceId, typeLabel, pkg.activationCode, contact)
 }
 
 private fun shareRawCodeViaWhatsApp(
     context: Context,
     customerName: String,
     deviceId: String,
+    licenseTypeLabel: String,
     activationCode: String,
     contact: IssuerContactConfig
 ) {
     val message = buildString {
         appendLine("مرحباً بك في ${contact.issuerTitle}،")
-        appendLine("تم إصدار ترخيصك الدائم بنجاح:")
+        appendLine("تم إصدار مفتاح ترخيصك بنجاح:")
         appendLine("• المنشأة: $customerName")
         appendLine("• معرّف الجهاز: $deviceId")
-        appendLine("• نوع الترخيص: دائم")
+        appendLine("• نوع الترخيص: $licenseTypeLabel")
         if (contact.supportPhone.isNotBlank()) {
             appendLine("• الدعم الفني: ${contact.supportPhone}")
         }
         appendLine()
-        appendLine("انسخ كود التفعيل التالي وألصقه في نافذة التراخيص داخل برنامج الكمبيوتر:")
+        appendLine("انسخ مفتاح التفعيل التالي وألصقه في نافذة التراخيص داخل برنامج الكمبيوتر:")
         appendLine(activationCode)
         if (contact.footerNote.isNotBlank()) {
             appendLine()
@@ -961,5 +1191,5 @@ private fun shareRawCodeViaWhatsApp(
         type = "text/plain"
         putExtra(Intent.EXTRA_TEXT, message)
     }
-    context.startActivity(Intent.createChooser(intent, "إرسال كود التفعيل إلى العميل"))
+    context.startActivity(Intent.createChooser(intent, "إرسال مفتاح التفعيل إلى العميل"))
 }

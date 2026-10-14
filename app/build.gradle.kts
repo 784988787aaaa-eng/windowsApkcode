@@ -1,6 +1,15 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+val signingPropsFile = rootProject.file("signing.properties")
+val signingProps = Properties()
+if (signingPropsFile.exists()) {
+    FileInputStream(signingPropsFile).use { signingProps.load(it) }
 }
 
 android {
@@ -11,10 +20,26 @@ android {
         applicationId = "com.smartledger.licenseissuer"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0"
         vectorDrawables {
             useSupportLibrary = true
+        }
+    }
+
+    signingConfigs {
+        val ksPath = signingProps.getProperty("storeFile") ?: System.getenv("KEYSTORE_FILE")
+        val ksPass = signingProps.getProperty("storePassword") ?: System.getenv("KEYSTORE_PASSWORD")
+        val kAlias = signingProps.getProperty("keyAlias") ?: System.getenv("KEY_ALIAS")
+        val kPass = signingProps.getProperty("keyPassword") ?: System.getenv("KEY_PASSWORD")
+
+        if (!ksPath.isNullOrBlank() && !ksPass.isNullOrBlank() && !kAlias.isNullOrBlank() && !kPass.isNullOrBlank()) {
+            create("release") {
+                storeFile = rootProject.file(ksPath)
+                storePassword = ksPass
+                keyAlias = kAlias
+                keyPassword = kPass
+            }
         }
     }
 
@@ -25,6 +50,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            val releaseSigning = signingConfigs.findByName("release")
+            if (releaseSigning != null) {
+                signingConfig = releaseSigning
+            }
         }
         debug {
             isMinifyEnabled = false

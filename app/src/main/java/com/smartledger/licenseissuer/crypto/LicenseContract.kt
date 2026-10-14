@@ -11,7 +11,17 @@ import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
 import java.util.UUID
 
+enum class LicenseStatusState(val labelAr: String) {
+    ACTIVE("صالح ونشط"),
+    EXPIRED("منتهي الصلاحية"),
+    REVOKED("ملغى"),
+    NOT_YET_VALID("لم يبدأ سريانه"),
+    INVALID("غير صالح"),
+    DEVICE_MISMATCH("غير مرتبط بالجهاز")
+}
+
 data class ParsedActivationRequest(
+    val productCode: String,
     val deviceId: String,
     val customerName: String,
     val usedOperations: Int = 0,
@@ -21,9 +31,14 @@ data class ParsedActivationRequest(
 
 data class IssuedLicensePackage(
     val licenseId: String,
+    val productCode: String,
+    val licenseType: String,
     val deviceId: String,
     val customerName: String,
+    val customerCode: String,
     val issuedAtUnixSeconds: Long,
+    val startsAtUnixSeconds: Long,
+    val expiresAtUnixSeconds: Long,
     val edition: String,
     val notes: String,
     val canonicalPayloadJson: String,
@@ -31,15 +46,17 @@ data class IssuedLicensePackage(
 )
 
 /**
- * Implements the exact SLPRO1 cryptographic contract shared between Android License Issuer
- * and Windows SmartLedger Pro (ECDSA P-256 / SHA-256 / IEEE P1363 64-byte signature).
- * Uses deterministic RFC 8259 JSON serialization without external library dependencies.
+ * Shared cryptographic licensing contract between Android License Issuer and Windows SmartLedger Pro.
+ * Supports Perpetual and Timed licenses (with start/expiration timestamps), customer codes,
+ * device binding, and signed revocation certificates (SLREV1).
  */
 object LicenseContract {
     const val TOKEN_PREFIX = "SLPRO1"
+    const val REVOCATION_PREFIX = "SLREV1"
     const val REQUEST_PREFIX = "SLREQ1"
-    const val PRODUCT_CODE = "SLPRO"
-    const val LICENSE_TYPE = "PERPETUAL"
+    const val PRODUCT_CODE_SLPRO = "SLPRO"
+    const val LICENSE_TYPE_PERPETUAL = "PERPETUAL"
+    const val LICENSE_TYPE_TIMED = "TIMED"
     const val FORMAT_VERSION = 1
 
     private val DEVICE_CODE_REGEX = Regex("SLP-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}", RegexOption.IGNORE_CASE)
@@ -50,7 +67,6 @@ object LicenseContract {
         if (raw.isNullOrBlank()) return ""
         val clean = raw.trim().uppercase().filter { it.isLetterOrDigit() }
         val withoutPrefix = if (clean.startsWith("SLP")) clean.substring(3) else clean
-        // If a 64-char SHA-256 legacy hardware ID is provided, normalize to its 16-char canonical prefix
         if (withoutPrefix.length == 64 && withoutPrefix.all { it in '0'..'9' || it in 'A'..'F' }) {
             return withoutPrefix.substring(0, 16)
         }
@@ -70,32 +86,27 @@ object LicenseContract {
         return clean.length == 16 && clean.all { it in '0'..'9' || it in 'A'..'F' }
     }
 
-    /**
-     * Parses either a full WhatsApp request message containing SLREQ1:..., or raw text containing SLP-XXXX-XXXX-XXXX-XXXX.
-     */
     fun parseIncomingRequest(rawText: String): ParsedActivationRequest {
         val trimmed = rawText.trim()
         if (trimmed.isEmpty()) {
-            return ParsedActivationRequest("", "", 0, false, "النص المدخل فارغ. ألصق رسالة طلب التفعيل أو معرّف الجهاز.")
+            return ParsedActivationRequest(PRODUCT_CODE_SLPRO, "", "", 0, false, "النص المدخل فارغ. ألصق رسالة طلب التفعيل أو معرّف جهاز Windows.")
         }
 
-        // 1. Structured SLREQ1:<base64url> token
         val tokenMatch = REQUEST_TOKEN_REGEX.find(trimmed)
         if (tokenMatch != null) {
             try {
                 val jsonText = String(base64UrlDecode(tokenMatch.groupValues[1]), StandardCharsets.UTF_8)
+                val prod = extractJsonStringField(jsonText, "p").ifBlank { PRODUCT_CODE_SLPRO }
                 val did = formatCanonicalDeviceCode(extractJsonStringField(jsonText, "did"))
                 val cn = extractJsonStringField(jsonText, "cn").trim()
-                val ops = extractJsonIntField(jsonText, "ops")
+                val ops = extractJsonLongField(jsonText, "ops").toInt()
                 if (isValidDeviceCode(did)) {
-                    return ParsedActivationRequest(did, cn, ops, true)
+                    return ParsedActivationRequest(prod, did, cn, ops, true)
                 }
             } catch (_: Exception) {
-                // Fall back to plain text extraction below
             }
         }
 
-        // 2. Extract SLP-XXXX-XXXX-XXXX-XXXX from WhatsApp text
         val deviceMatch = DEVICE_CODE_REGEX.find(trimmed)
         if (deviceMatch != null) {
             val did = formatCanonicalDeviceCode(deviceMatch.value)
@@ -106,34 +117,31 @@ object LicenseContract {
                     break
                 }
             }
-            return ParsedActivationRequest(did, extractedCustomer, 0, true)
+            return ParsedActivationRequest(PRODUCT_CODE_SLPRO, did, extractedCustomer, 0, true)
         }
 
-        // 3. Check 64-char legacy hash or direct 16-char hex
         val hex64Match = HEX_64_REGEX.find(trimmed)
         if (hex64Match != null) {
             val did = formatCanonicalDeviceCode(hex64Match.value)
             if (isValidDeviceCode(did)) {
-                return ParsedActivationRequest(did, "", 0, true)
+                return ParsedActivationRequest(PRODUCT_CODE_SLPRO, did, "", 0, true)
             }
         }
 
         if (isValidDeviceCode(trimmed)) {
-            return ParsedActivationRequest(formatCanonicalDeviceCode(trimmed), "", 0, true)
+            return ParsedActivationRequest(PRODUCT_CODE_SLPRO, formatCanonicalDeviceCode(trimmed), "", 0, true)
         }
 
         return ParsedActivationRequest(
+            PRODUCT_CODE_SLPRO,
             "",
             "",
             0,
             false,
-            "لم يتم العثور على معرّف جهاز صالح بصيغة SLP-XXXX-XXXX-XXXX-XXXX داخل النص."
+            "لم يتم العثور على معرّف جهاز Windows صالح بصيغة SLP-XXXX-XXXX-XXXX-XXXX داخل النص."
         )
     }
 
-    /**
-     * Issues a cryptographically signed perpetual license token compatible with Windows SmartLedger Pro.
-     */
     fun issuePerpetualLicense(
         rawDeviceId: String,
         customerName: String,
@@ -141,31 +149,82 @@ object LicenseContract {
         privateKeyPkcs8Base64: String,
         publicKeySpkiBase64: String? = null,
         issuedAtUnixOverride: Long? = null,
+        licenseIdOverride: String? = null,
+        customerCode: String = ""
+    ): IssuedLicensePackage = issueLicense(
+        productCode = PRODUCT_CODE_SLPRO,
+        licenseType = LICENSE_TYPE_PERPETUAL,
+        rawDeviceId = rawDeviceId,
+        customerName = customerName,
+        customerCode = customerCode,
+        startsAtUnixSeconds = issuedAtUnixOverride ?: (System.currentTimeMillis() / 1000L),
+        expiresAtUnixSeconds = 0L,
+        notes = notes,
+        privateKeyPkcs8Base64 = privateKeyPkcs8Base64,
+        publicKeySpkiBase64 = publicKeySpkiBase64,
+        issuedAtUnixOverride = issuedAtUnixOverride,
+        licenseIdOverride = licenseIdOverride
+    )
+
+    fun issueLicense(
+        productCode: String = PRODUCT_CODE_SLPRO,
+        licenseType: String = LICENSE_TYPE_PERPETUAL,
+        rawDeviceId: String,
+        customerName: String,
+        customerCode: String = "",
+        startsAtUnixSeconds: Long = 0L,
+        expiresAtUnixSeconds: Long = 0L,
+        notes: String = "",
+        privateKeyPkcs8Base64: String,
+        publicKeySpkiBase64: String? = null,
+        issuedAtUnixOverride: Long? = null,
         licenseIdOverride: String? = null
     ): IssuedLicensePackage {
         require(isValidDeviceCode(rawDeviceId)) {
-            "معرّف الجهاز غير صالح؛ يجب أن يتكون من 16 رمزاً ست عشرياً (مثال: SLP-4F8A-92C1-7B3E-D056)."
+            "معرّف جهاز Windows غير صالح؛ يجب أن يتكون من 16 رمزاً ست عشرياً (مثال: SLP-4F8A-92C1-7B3E-D056)."
         }
         require(privateKeyPkcs8Base64.isNotBlank()) {
-            "لم يتم إعداد مفتاح الإصدار الخاص بعد؛ يرجى استيراد المفتاح أو توليد زوج مفاتيح من تبويب المفاتيح والأمان."
+            "لم يتم إعداد مفتاح التوقيع الخاص بعد؛ يرجى استيراد المفتاح أو توليد زوج مفاتيح من تبويب المفاتيح والإعدادات."
+        }
+        val cleanProduct = productCode.trim().uppercase()
+        require(cleanProduct == PRODUCT_CODE_SLPRO) {
+            "المنتج المستهدف غير مدعوم."
+        }
+        val cleanType = licenseType.trim().uppercase()
+        require(cleanType == LICENSE_TYPE_PERPETUAL || cleanType == LICENSE_TYPE_TIMED) {
+            "نوع الترخيص يجب أن يكون دائماً (PERPETUAL) أو محدداً بمدة (TIMED)."
         }
 
-        val cleanCustomer = customerName.trim().ifEmpty { "عميل الدفتر الذكي" }
+        val cleanCustomer = customerName.trim()
+        require(cleanCustomer.length >= 2) {
+            "اسم العميل أو الجهة مطلوب (حرفان على الأقل)."
+        }
+
         val canonicalDeviceId = formatCanonicalDeviceCode(rawDeviceId)
         val licenseId = (licenseIdOverride ?: UUID.randomUUID().toString().replace("-", "").substring(0, 16)).uppercase()
         val issuedAt = issuedAtUnixOverride ?: (System.currentTimeMillis() / 1000L)
-        val cleanNotes = notes.trim()
+        val effectiveStart = if (startsAtUnixSeconds > 0L) startsAtUnixSeconds else issuedAt
+        val effectiveExpiry = if (cleanType == LICENSE_TYPE_TIMED) expiresAtUnixSeconds else 0L
+
+        if (cleanType == LICENSE_TYPE_TIMED) {
+            require(effectiveExpiry > effectiveStart) {
+                "في الترخيص المحدد بمدة، يجب أن يكون تاريخ الانتهاء بعد تاريخ البداية."
+            }
+        }
 
         val payloadJson = buildCanonicalPayloadJson(
             version = FORMAT_VERSION,
-            productCode = PRODUCT_CODE,
-            licenseType = LICENSE_TYPE,
+            productCode = cleanProduct,
+            licenseType = cleanType,
             licenseId = licenseId,
             deviceId = canonicalDeviceId,
             customerName = cleanCustomer,
+            customerCode = customerCode.trim(),
             issuedAt = issuedAt,
+            startsAt = effectiveStart,
+            expiresAt = effectiveExpiry,
             edition = "PRO",
-            notes = cleanNotes
+            notes = notes.trim()
         )
         val payloadBytes = payloadJson.toByteArray(StandardCharsets.UTF_8)
 
@@ -183,14 +242,95 @@ object LicenseContract {
         val token = "$TOKEN_PREFIX.${base64UrlEncode(payloadBytes)}.${base64UrlEncode(ieeeP1363Signature)}"
         return IssuedLicensePackage(
             licenseId = licenseId,
+            productCode = cleanProduct,
+            licenseType = cleanType,
             deviceId = canonicalDeviceId,
             customerName = cleanCustomer,
+            customerCode = customerCode.trim(),
             issuedAtUnixSeconds = issuedAt,
+            startsAtUnixSeconds = effectiveStart,
+            expiresAtUnixSeconds = effectiveExpiry,
             edition = "PRO",
-            notes = cleanNotes,
+            notes = notes.trim(),
             canonicalPayloadJson = payloadJson,
             activationCode = token
         )
+    }
+
+    fun issueRevocationCertificate(
+        licenseId: String,
+        deviceId: String,
+        reason: String,
+        privateKeyPkcs8Base64: String,
+        publicKeySpkiBase64: String? = null,
+        revokedAtUnixOverride: Long? = null
+    ): String {
+        val cleanLid = licenseId.trim().uppercase()
+        val cleanDid = formatCanonicalDeviceCode(deviceId)
+        val revokedAt = revokedAtUnixOverride ?: (System.currentTimeMillis() / 1000L)
+        val cleanReason = reason.trim().ifEmpty { "إلغاء إداري من مسؤول التراخيص" }
+
+        val sb = StringBuilder(180)
+        sb.append('{')
+        sb.append(""v":1,")
+        sb.append(""p":"").append(PRODUCT_CODE_SLPRO).append("",")
+        sb.append(""lid":"").append(escapeJson(cleanLid)).append("",")
+        sb.append(""did":"").append(escapeJson(cleanDid)).append("",")
+        sb.append(""rat":").append(revokedAt).append(',')
+        sb.append(""rsn":"").append(escapeJson(cleanReason)).append('"')
+        sb.append('}')
+
+        val payloadBytes = sb.toString().toByteArray(StandardCharsets.UTF_8)
+        val privateKey = loadPrivateKey(privateKeyPkcs8Base64)
+        val derSignature = signSha256WithEcdsaDer(payloadBytes, privateKey)
+        val ieeeP1363Signature = convertDerToIeeeP1363(derSignature, 32)
+
+        if (!publicKeySpkiBase64.isNullOrBlank()) {
+            val pubKey = loadPublicKey(publicKeySpkiBase64)
+            check(verifySha256WithEcdsaIeeeP1363(payloadBytes, ieeeP1363Signature, pubKey)) {
+                "فشل التحقق من توقيع شهادة الإلغاء."
+            }
+        }
+
+        return "$REVOCATION_PREFIX.${base64UrlEncode(payloadBytes)}.${base64UrlEncode(ieeeP1363Signature)}"
+    }
+
+    fun evaluateLicenseTokenStatus(
+        activationCode: String,
+        publicKeySpkiBase64: String,
+        isRevokedInDb: Boolean,
+        expectedDeviceId: String? = null,
+        nowUnixSeconds: Long = System.currentTimeMillis() / 1000L
+    ): LicenseStatusState {
+        if (isRevokedInDb) return LicenseStatusState.REVOKED
+        val parts = activationCode.trim().split('.')
+        if (parts.size != 3 || !parts[0].equals(TOKEN_PREFIX, ignoreCase = true)) {
+            return LicenseStatusState.INVALID
+        }
+        return try {
+            val payloadBytes = base64UrlDecode(parts[1])
+            val sigBytes = base64UrlDecode(parts[2])
+            val pubKey = loadPublicKey(publicKeySpkiBase64)
+            if (!verifySha256WithEcdsaIeeeP1363(payloadBytes, sigBytes, pubKey)) {
+                return LicenseStatusState.INVALID
+            }
+            val json = String(payloadBytes, StandardCharsets.UTF_8)
+            val did = formatCanonicalDeviceCode(extractJsonStringField(json, "did"))
+            if (!expectedDeviceId.isNullOrBlank() && normalizeDeviceId(did) != normalizeDeviceId(expectedDeviceId)) {
+                return LicenseStatusState.DEVICE_MISMATCH
+            }
+            val nbf = extractJsonLongField(json, "nbf")
+            val exp = extractJsonLongField(json, "exp")
+            if (nbf > 0L && nowUnixSeconds + 86400L < nbf) {
+                return LicenseStatusState.NOT_YET_VALID
+            }
+            if (exp > 0L && nowUnixSeconds > exp) {
+                return LicenseStatusState.EXPIRED
+            }
+            LicenseStatusState.ACTIVE
+        } catch (_: Exception) {
+            LicenseStatusState.INVALID
+        }
     }
 
     fun buildCanonicalPayloadJson(
@@ -200,11 +340,14 @@ object LicenseContract {
         licenseId: String,
         deviceId: String,
         customerName: String,
+        customerCode: String = "",
         issuedAt: Long,
-        edition: String,
-        notes: String
+        startsAt: Long = 0L,
+        expiresAt: Long = 0L,
+        edition: String = "PRO",
+        notes: String = ""
     ): String {
-        val sb = StringBuilder(256)
+        val sb = StringBuilder(320)
         sb.append('{')
         sb.append(""v":").append(version).append(',')
         sb.append(""p":"").append(escapeJson(productCode)).append("",")
@@ -212,7 +355,16 @@ object LicenseContract {
         sb.append(""lid":"").append(escapeJson(licenseId)).append("",")
         sb.append(""did":"").append(escapeJson(deviceId)).append("",")
         sb.append(""cn":"").append(escapeJson(customerName)).append("",")
+        if (customerCode.isNotBlank()) {
+            sb.append(""cid":"").append(escapeJson(customerCode)).append("",")
+        }
         sb.append(""iat":").append(issuedAt).append(',')
+        if (startsAt > 0L) {
+            sb.append(""nbf":").append(startsAt).append(',')
+        }
+        if (expiresAt > 0L) {
+            sb.append(""exp":").append(expiresAt).append(',')
+        }
         sb.append(""ed":"").append(escapeJson(edition)).append('"')
         if (notes.isNotBlank()) {
             sb.append(","nt":"").append(escapeJson(notes)).append('"')
@@ -249,10 +401,10 @@ object LicenseContract {
             .replace("\t", "	")
     }
 
-    internal fun extractJsonIntField(json: String, key: String): Int {
+    internal fun extractJsonLongField(json: String, key: String): Long {
         val pattern = Regex(""${Regex.escape(key)}"\s*:\s*(-?\d+)")
-        val match = pattern.find(json) ?: return 0
-        return match.groupValues[1].toIntOrNull() ?: 0
+        val match = pattern.find(json) ?: return 0L
+        return match.groupValues[1].toLongOrNull() ?: 0L
     }
 
     fun loadPrivateKey(pkcs8Base64: String): PrivateKey {

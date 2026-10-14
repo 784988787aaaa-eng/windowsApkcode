@@ -60,7 +60,7 @@ object LicenseContract {
     const val FORMAT_VERSION = 1
 
     private val DEVICE_CODE_REGEX = Regex("SLP-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}", RegexOption.IGNORE_CASE)
-    private val HEX_64_REGEX = Regex("\b[0-9A-F]{64}\b", RegexOption.IGNORE_CASE)
+    private val HEX_64_REGEX = Regex("\\b[0-9A-F]{64}\\b", RegexOption.IGNORE_CASE)
     private val REQUEST_TOKEN_REGEX = Regex("SLREQ1:([A-Za-z0-9_-]+)")
 
     fun normalizeDeviceId(raw: String?): String {
@@ -272,12 +272,12 @@ object LicenseContract {
 
         val sb = StringBuilder(180)
         sb.append('{')
-        sb.append(""v":1,")
-        sb.append(""p":"").append(PRODUCT_CODE_SLPRO).append("",")
-        sb.append(""lid":"").append(escapeJson(cleanLid)).append("",")
-        sb.append(""did":"").append(escapeJson(cleanDid)).append("",")
-        sb.append(""rat":").append(revokedAt).append(',')
-        sb.append(""rsn":"").append(escapeJson(cleanReason)).append('"')
+        sb.append("\"v\":1,")
+        sb.append("\"p\":\"").append(PRODUCT_CODE_SLPRO).append("\",")
+        sb.append("\"lid\":\"").append(escapeJson(cleanLid)).append("\",")
+        sb.append("\"did\":\"").append(escapeJson(cleanDid)).append("\",")
+        sb.append("\"rat\":").append(revokedAt).append(',')
+        sb.append("\"rsn\":\"").append(escapeJson(cleanReason)).append('"')
         sb.append('}')
 
         val payloadBytes = sb.toString().toByteArray(StandardCharsets.UTF_8)
@@ -349,25 +349,25 @@ object LicenseContract {
     ): String {
         val sb = StringBuilder(320)
         sb.append('{')
-        sb.append(""v":").append(version).append(',')
-        sb.append(""p":"").append(escapeJson(productCode)).append("",")
-        sb.append(""t":"").append(escapeJson(licenseType)).append("",")
-        sb.append(""lid":"").append(escapeJson(licenseId)).append("",")
-        sb.append(""did":"").append(escapeJson(deviceId)).append("",")
-        sb.append(""cn":"").append(escapeJson(customerName)).append("",")
+        sb.append("\"v\":").append(version).append(',')
+        sb.append("\"p\":\"").append(escapeJson(productCode)).append("\",")
+        sb.append("\"t\":\"").append(escapeJson(licenseType)).append("\",")
+        sb.append("\"lid\":\"").append(escapeJson(licenseId)).append("\",")
+        sb.append("\"did\":\"").append(escapeJson(deviceId)).append("\",")
+        sb.append("\"cn\":\"").append(escapeJson(customerName)).append("\",")
         if (customerCode.isNotBlank()) {
-            sb.append(""cid":"").append(escapeJson(customerCode)).append("",")
+            sb.append("\"cid\":\"").append(escapeJson(customerCode)).append("\",")
         }
-        sb.append(""iat":").append(issuedAt).append(',')
+        sb.append("\"iat\":").append(issuedAt).append(',')
         if (startsAt > 0L) {
-            sb.append(""nbf":").append(startsAt).append(',')
+            sb.append("\"nbf\":").append(startsAt).append(',')
         }
         if (expiresAt > 0L) {
-            sb.append(""exp":").append(expiresAt).append(',')
+            sb.append("\"exp\":").append(expiresAt).append(',')
         }
-        sb.append(""ed":"").append(escapeJson(edition)).append('"')
+        sb.append("\"ed\":\"").append(escapeJson(edition)).append('"')
         if (notes.isNotBlank()) {
-            sb.append(","nt":"").append(escapeJson(notes)).append('"')
+            sb.append(",\"nt\":\"").append(escapeJson(notes)).append('"')
         }
         sb.append('}')
         return sb.toString()
@@ -377,12 +377,11 @@ object LicenseContract {
         val sb = StringBuilder(value.length + 8)
         for (ch in value) {
             when (ch) {
-                '\' -> sb.append("\\")
-                '"' -> sb.append("\"")
-                '
-' -> sb.append("\n")
-                '' -> sb.append("\r")
-                '	' -> sb.append("\t")
+                '\\' -> sb.append("\\\\")
+                '"' -> sb.append("\\\"")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
                 else -> sb.append(ch)
             }
         }
@@ -390,19 +389,18 @@ object LicenseContract {
     }
 
     internal fun extractJsonStringField(json: String, key: String): String {
-        val pattern = Regex(""${Regex.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)"")
+        val pattern = Regex("\"" + Regex.escape(key) + "\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"")
         val match = pattern.find(json) ?: return ""
         return match.groupValues[1]
-            .replace("\"", """)
-            .replace("\\", "\")
-            .replace("\n", "
-")
-            .replace("\r", "")
-            .replace("\t", "	")
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+            .replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace("\\t", "\t")
     }
 
     internal fun extractJsonLongField(json: String, key: String): Long {
-        val pattern = Regex(""${Regex.escape(key)}"\s*:\s*(-?\d+)")
+        val pattern = Regex("\"" + Regex.escape(key) + "\"\\s*:\\s*(-?\\d+)")
         val match = pattern.find(json) ?: return 0L
         return match.groupValues[1].toLongOrNull() ?: 0L
     }
@@ -411,7 +409,7 @@ object LicenseContract {
         val clean = pkcs8Base64
             .replace("-----BEGIN PRIVATE KEY-----", "")
             .replace("-----END PRIVATE KEY-----", "")
-            .replace("\s".toRegex(), "")
+            .replace("\\s".toRegex(), "")
         val keyBytes = Base64.getDecoder().decode(clean)
         val kf = KeyFactory.getInstance("EC")
         return kf.generatePrivate(PKCS8EncodedKeySpec(keyBytes))

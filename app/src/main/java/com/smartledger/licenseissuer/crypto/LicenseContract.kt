@@ -419,7 +419,7 @@ object LicenseContract {
         val clean = spkiBase64
             .replace("-----BEGIN PUBLIC KEY-----", "")
             .replace("-----END PUBLIC KEY-----", "")
-            .replace("\s".toRegex(), "")
+            .replace("\\s".toRegex(), "")
         val keyBytes = Base64.getDecoder().decode(clean)
         val kf = KeyFactory.getInstance("EC")
         return kf.generatePublic(X509EncodedKeySpec(keyBytes))
